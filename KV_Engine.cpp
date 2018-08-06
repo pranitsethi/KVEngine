@@ -1,95 +1,57 @@
 #include <KV_Engine.h>
 
-connection::connection(const std::string& host, const unsigned aport) : capacity(0), port(aport)
+redserver::redserver(const std::string& host, const unsigned aport) : capacity(0), port(aport)
 {
     c = redisConnect(host.c_str(), aport);
     if (c->err != REDIS_OK)
     {
         redisFree(c);
         printf("connect failed, err %d\n", c->err);
-        //throw unable_to_connect();
     }
 }
 
-connection::connection(const std::string& path)
+redserver::redserver(const std::string& path)
 {
     c = redisConnectUnix(path.c_str());
     if (c->err != REDIS_OK)
     {
         redisFree(c);
-        //throw unable_to_connect();
     }
 }
 
-connection::~connection()
+redserver::~redserver()
 {
     redisFree(c);
 }
 
-void connection::append(const std::vector<std::string> &commands)
-{
-    std::vector<const char*> argv;
-    argv.reserve(commands.size());
-    std::vector<size_t> argvlen;
-    argvlen.reserve(commands.size());
 
-    for (std::vector<std::string>::const_iterator it = commands.begin(); it != commands.end(); ++it) {
-        argv.push_back(it->c_str());
-        argvlen.push_back(it->size());
-    }
-
-    int ret = redisAppendCommandArgv(c, static_cast<int>(commands.size()), argv.data(), argvlen.data());
-    if (ret != REDIS_OK)
-    {
-        //throw transport_failure();
-    }
+bool redserver::underCapacity() const 
+{ 
+   printf("this node: %p, cap %d, totcap %d\n", this, capacity, TotalCapacity);
+   return capacity < redserver::TotalCapacity;  
 }
 
-reply connection::get_reply()
-{
-    redisReply *r;
-    int error = redisGetReply(c, reinterpret_cast<void**>(&r));
-    if (error != REDIS_OK)
-    {
-        //throw transport_failure();
-    }
-    reply ret(r);
-    freeReplyObject(r);
-
-    if (ret.type() == reply::type_t::ERROR &&
-		(ret.str().find("READONLY") == 0) )
-    {
-        //throw slave_read_only();
-    }
-    return ret;
-}
-
-std::vector<reply> connection::get_replies(unsigned int count)
-{
-    std::vector<reply> ret;
-    for (unsigned int i=0; i < count; ++i)
-    {
-        ret.push_back(get_reply());
-    }
-    return ret;
-}
-
-bool connection::is_valid() const
-{
-    return c->err == REDIS_OK;
-}
-
-bool connection::underCapacity() const 
+void Ring::removeVnodes(redserver* con) 
 { 
 
-   printf("this node: %p, cap %d, totcap %d\n", this, capacity, TotalCapacity);
-   return capacity < connection::TotalCapacity;  
-} 
+     list<int>::iterator it;
+     for (it = con->vserver.begin(); it != con->vserver.end() ; ++it) { 
+       
+          ring_map.erase(*it);
+     } 
+}
+  
+void Ring::removePnode(redserver* con) 
+{ 
 
-int Ring::addNodeToRing(connection* con) { 
+          ring_map.erase(con->hash);
+}  
+
+int Ring::addNodeToRing(redserver* con) 
+{
 
      // get the port (seed hash value)
-      int ihash = hash(con->port); 
+      int ihash = hash(con->port * stride); 
       con->hash = ihash;
       ring_map[ihash]  = con; 
       printf("adding node server %p, port %d\n", con, con->getPort());
@@ -97,24 +59,25 @@ int Ring::addNodeToRing(connection* con) {
 
       // add virtual nodes
       for (int i = 2; i < virtNodes + 2; ++i) {
-           int ihash = hash(con->port * i); // TODO: better spread 
+           int ihash = hash(con->port * i * stride); // TODO: better spread 
            con->hash = ihash;
            ring_map[ihash]  = con; 
-           con->addTolist(ihash); 
+           con->addToList(ihash); 
            printf("adding vnode server %p, port %d\n", con, ihash);
            ++TotalNodes;
+           stride *= 2; // TODO: ring hash spread  
       }
 
      return 0; // TODO: error handling
      
 }
 
-connection* Ring::getNode(int hash) { 
+redserver* Ring::getNode(int hash) { 
 
     // given a hash; get the next server in the ring
     // if the server is down then get next and so on
 
-    map<int, connection*>::iterator itnode;
+    map<int, redserver*>::iterator itnode;
 
     printf("get: looking for hash %d\n", hash); // TODO: REMOVE
     for (itnode = ring_map.begin(); itnode != ring_map.end(); ++itnode) { 
@@ -127,17 +90,39 @@ connection* Ring::getNode(int hash) {
     return itnode->second;
 }
 
-connection* Ring::getNextNode(int hash) { 
+redserver* Ring::getFailedNode(int hash) { 
 
     // given a hash; get the next server in the ring
     // if the server is down then get next and so on
 
-    map<int, connection*>::iterator itnode;
+    map<int, redserver*>::iterator itnode;
+    itnode = ring_map.lower_bound(hash);
+    printf("getFailed: found node %p\n", itnode->second);
+    return itnode->second;
+}
+
+redserver* Ring::getNextNode(int hash) { 
+
+    // given a hash; get the next server in the ring
+    // if the server is down then get next and so on
+
+    map<int, redserver*>::iterator itnode;
     itnode = ring_map.upper_bound(hash);
-    int lhash = ((connection*)itnode->second)->hash + 1; 
+    int lhash = ((redserver*)itnode->second)->hash + 1; 
     itnode = ring_map.upper_bound(lhash);
     return itnode->second;
 }
+
+void KeyValue_Engine::failNode(int port) { 
+
+     // pull all servers (incuding vnodes) out of the ring
+
+     int ihash = ring_engine.hash(port);
+     redserver* con = (redserver*)ring_engine.getFailedNode(ihash); 
+     printf("put: got back node server %p, port %d\n", con, con->getPort());
+     ring_engine.removeVnodes(con);
+     ring_engine.removePnode(con);
+} 
 
 int KeyValue_Engine::put(int key, int value) { 
 
@@ -147,7 +132,7 @@ int KeyValue_Engine::put(int key, int value) {
 
      int ihash = ring_engine.hash(key);
 
-     connection* con = (connection*)ring_engine.getNode(ihash); 
+     redserver* con = (redserver*)ring_engine.getNode(ihash); 
      printf("put: got back node server %p, port %d\n", con, con->getPort());
 
      // check for capacity 
@@ -158,13 +143,14 @@ int KeyValue_Engine::put(int key, int value) {
 
      redisContext* ctx = con->c_ptr();
      redisReply* r = (redisReply*)redisCommand(ctx, "SET foo bar");
+     con->incrCapacity();
      printf("KV SET: %s\n", r->str);
      freeReplyObject(r);
 
     for (int i = 0; i < curr_RL; ++i) { 
 
         // make curr_RL number of copies to meet RL
-        connection* con = ring_engine.getNextNode(ihash); 
+        redserver* con = ring_engine.getNextNode(ihash); 
        // check for capacity 
         if (!con->underCapacity()) { 
          printf("Capacity exceeded on server %p, port %d\n", con, con->getPort());
@@ -173,6 +159,7 @@ int KeyValue_Engine::put(int key, int value) {
 
         redisContext* ctx = con->c_ptr();
         redisReply* r = (redisReply*)redisCommand(ctx, "SET foo bar");
+        con->incrCapacity();
         printf("KV SET: %s\n", r->str);
         freeReplyObject(r);
     } 
@@ -189,7 +176,7 @@ int KeyValue_Engine::get(int key) {
      // get the key 
      int ihash = ring_engine.hash(key);
 
-     connection* con = ring_engine.getNode(ihash); 
+     redserver* con = ring_engine.getNode(ihash); 
      redisContext* ctx = con->c_ptr();
      redisReply* r = (redisReply*)redisCommand(ctx, "GET foo"); 
      printf("KV reply contains %s\n", r->str);
@@ -207,8 +194,8 @@ int KeyValue_Engine::startServers(int N) {
       printf("starting a server on port %d\n", curr_port); 
       system(buf);
       //system("redis-server --port 6379 --daemonize yes");
-      sleep(2); // TODO: race when starting and establishing a connection
-      connection* c  = connection::create("127.0.0.1", curr_port);
+      sleep(2); // TODO: race when starting and establishing a redserver
+      redserver* c  = redserver::create("127.0.0.1", curr_port);
       printf("add node to ring %d\n", curr_port); 
       addNodeToRing(c);
     }
@@ -265,7 +252,7 @@ int KeyValue_Engine::getRL() {
 int KeyValue_Engine::bringUp(int N, int cap, int rLevel) { 
 
   // start servers 
-  // build connections to each server 
+  // build redservers to each server 
   // place the servers and vnodes in a consistent hash ring 
   startServers(N);
   printf("set RL\n");
@@ -306,9 +293,9 @@ int main(int argc, char **argv) {
    //sleep(2);
    //system("redis-server --port 6380&");
    //system("redis-server --port 6381&");
-   //connection* c  = connection::create("127.0.0.1", 6379);
-   //connection* c1  = connection::create("127.0.0.1", 6380);
-   //connection* c2  = connection::create("127.0.0.1", 6381);
+   //redserver* c  = redserver::create("127.0.0.1", 6379);
+   //redserver* c1  = redserver::create("127.0.0.1", 6380);
+   //redserver* c2  = redserver::create("127.0.0.1", 6381);
     //redisContext* ctx = c->c_ptr();
     //redisReply* r = (redisReply*)redisCommand(ctx, "SET foo bar");
     //printf("SET: %s\n", r->str);

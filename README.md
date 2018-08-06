@@ -34,12 +34,8 @@ Consistent hashing:
 4. simple interface to retrieve <V> for a <K> (Saved <K>)
 
 
- In this case consistent hashing alone doesn’t meet our requirements of reliability due to loss of data. Therefore there should definetely be replication and high availability which is feasible and out of scope of this introduction.
-
-
-
 Consensus (reliability level(RL)): 
--
+--------------------------------
 
 To meet the given requirments RL must at least be equal to or less than a minimum number of copies we feel safe with. Therefore, the cluster can support RL - 1 failures. We feel that 2 copies is bare minimum and 3 copies is sufficient to provide safe reliability. Anything over
 3 is overkill and less than 2 is unacceptable for reliability. 
@@ -61,11 +57,47 @@ If a minimum level of reliability can't be met then the cluster goes down.
 We won't deal with moving keys back when nodes are back up or shard migration.
 
 
+TODO:
+consistent hashing alone doesn’t meet our requirements of reliability due to loss of data. Therefore there should definetely be replication and high availability which is feasible and out of scope of this introduction.
+
 
 Questions to consider
  What happens to existing keys that no longer have predefined reliabilityLevel after failNode()
 has been called?
+
+[Pranit] Those keys transition from a RL achieved state to a still not achieved RL (reliability level). Therefore,
+a process needs to make more copies of the keys to other nodes. This would apply to keys that fall on failed nodes.
+
+
+
  What should the reliabilityLevel be for puts() after failNode()
+
+[Pranit] The reliability level (RL) should not be compromised in most cirsumstances unless the end user forces less copies. 
+We also don't want too many copies which is unreasonable. Therefore, at least a minimum RL should be met after a failed node
+or rather any time the cluster is up and serving requests. 
+
  Can your solution support a large number of nodes and a large load of requests?
+
+[Pranit] yes (theortically) but untested here. Consistent hashing with virtual nodes would distribute the load
+evenly amongst all physical nodes.
+
+
+Write up a few sentences describing your solution, key issues you faced, and simplifications you might have made? 
+
+[Pranit] Rudimentary consistent hash based solution. 
+
+issues faced: 
+   Policy decision with RL (reliabilty Level)
+
+Simplifications: 
+   RL tied with number of copies (assumption). 
+    
+
+What you might do if you had lot more time 
+
+   -- a LOT more. (starting with testing and error handling)
+   -- key migration (post failed node)
+   -- more to say on sharding
+   -- shard migration 
 
 
